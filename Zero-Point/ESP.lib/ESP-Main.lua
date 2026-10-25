@@ -8,7 +8,7 @@ assert(LocalPlayer, "NeonESP must run on the client")
 
 local NeonESP = {}
 NeonESP.__index = NeonESP
-NeonESP.Version = "2.2.0-ZeroPoint"
+NeonESP.Version = "2.3.0-ZeroPoint"
 
 local DEFAULTS = {
     Enabled = true,
@@ -38,7 +38,12 @@ local DEFAULTS = {
 local EXTRA_TYPES = {
     NameColor = "Color3",
     LabelText = "string",
-    OutlineColor = "Color3"
+    OutlineColor = "Color3",
+    RemoveWhenCollected = "boolean",
+    RemoveWhenInvisible = "boolean",
+    RequireTouchTransmitter = "boolean",
+    VisualChildName = "string",
+    InvisibleThreshold = "number"
 }
 
 local ROLE_COLORS = {
@@ -84,6 +89,8 @@ local function validateOption(name, value)
         assert(value >= 8 and value <= 40, "TextSize must be between 8 and 40")
     elseif name == "BoxThickness" then
         assert(value > 0, "BoxThickness must be positive")
+    elseif name == "InvisibleThreshold" then
+        assert(value >= 0 and value <= 1, "InvisibleThreshold must be between 0 and 1")
     elseif name == "BoxTransparency" or name == "FillTransparency" or name == "OutlineTransparency" then
         assert(value >= 0 and value <= 1, name .. " must be between 0 and 1")
     elseif name == "BoxSize" then
@@ -116,6 +123,7 @@ local function makeRecord(kind, target)
         Dirty = true,
         Style = nil,
         Connections = {},
+        VisualConnections = {},
         Role = nil,
         Dead = false
     }
@@ -143,6 +151,7 @@ end
 function NeonESP:_destroyRecord(record)
     self:_hide(record)
     disconnectAll(record.Connections)
+    disconnectAll(record.VisualConnections)
     if record.Highlight then
         record.Highlight:Destroy()
     end
@@ -343,6 +352,102 @@ function NeonESP:_drawBox(record, camera, boxCFrame, size, style, showBox)
     return points
 end
 
+local function objectVisualInvisible(visual, threshold)
+    if not visual or not visual:IsA("BasePart") then
+        return true
+    end
+    local effectiveTransparency = 1 - (1 - visual.Transparency) * (1 - visual.LocalTransparencyModifier)
+    return effectiveTransparency >= (threshold or 0.995)
+end
+
+function NeonESP:_monitorObjectLifecycle(record)
+    local object = record.Target
+    local style = record.Override
+    if not (style.RemoveWhenCollected or style.RemoveWhenInvisible or style.RequireTouchTransmitter) then
+        return
+    end
+
+    local visualName = style.VisualChildName
+    local function isCurrent()
+        return self._objects[object] == record and not self._destroyed
+    end
+
+    local function refresh()
+        if not isCurrent() then return end
+        local visual = record.VisualPart
+        if style.RemoveWhenCollected and (
+            object:GetAttribute("Collected") == true
+            or object:GetAttribute("Delete") == true
+            or (visual and (visual:GetAttribute("Collected") == true or visual:GetAttribute("Delete") == true))
+        ) then
+            self:RemoveObject(object)
+            return
+        end
+        if style.RequireTouchTransmitter and not object:FindFirstChildWhichIsA("TouchTransmitter") then
+            self:RemoveObject(object)
+            return
+        end
+        if style.RemoveWhenInvisible then
+            if not visual then
+                self:_hide(record)
+                return
+            end
+            if objectVisualInvisible(visual, style.InvisibleThreshold) then
+                if record.VisualWasVisible then
+                    self:RemoveObject(object)
+                else
+                    self:_hide(record)
+                end
+                return
+            end
+            record.VisualWasVisible = true
+        end
+    end
+
+    local function bindVisual()
+        disconnectAll(record.VisualConnections)
+        table.clear(record.VisualConnections)
+        local visual = visualName and visualName ~= "" and object:FindFirstChild(visualName, true) or object
+        record.VisualPart = visual
+        if visual and visual:IsA("BasePart") then
+            if style.RemoveWhenInvisible then
+                table.insert(record.VisualConnections, visual:GetPropertyChangedSignal("Transparency"):Connect(refresh))
+                table.insert(record.VisualConnections, visual:GetPropertyChangedSignal("LocalTransparencyModifier"):Connect(refresh))
+            end
+            if style.RemoveWhenCollected then
+                table.insert(record.VisualConnections, visual:GetAttributeChangedSignal("Collected"):Connect(refresh))
+                table.insert(record.VisualConnections, visual:GetAttributeChangedSignal("Delete"):Connect(refresh))
+            end
+        end
+        refresh()
+    end
+
+    if style.RemoveWhenCollected then
+        table.insert(record.Connections, object:GetAttributeChangedSignal("Collected"):Connect(refresh))
+        table.insert(record.Connections, object:GetAttributeChangedSignal("Delete"):Connect(refresh))
+    end
+    if style.RequireTouchTransmitter then
+        table.insert(record.Connections, object.ChildRemoved:Connect(function(child)
+            if child:IsA("TouchTransmitter") and isCurrent() then
+                self:RemoveObject(object)
+            end
+        end))
+    end
+    if visualName and visualName ~= "" then
+        table.insert(record.Connections, object.DescendantAdded:Connect(function(child)
+            if child.Name == visualName and child:IsA("BasePart") then
+                bindVisual()
+            end
+        end))
+        table.insert(record.Connections, object.DescendantRemoving:Connect(function(child)
+            if child == record.VisualPart and isCurrent() then
+                self:RemoveObject(object)
+            end
+        end))
+    end
+    bindVisual()
+end
+
 function NeonESP:_geometry(record)
     if record.Kind == "Player" then
         local character = record.Character
@@ -389,6 +494,12 @@ function NeonESP:_renderRecord(record, camera, origin)
     if record.Kind == "Player" and style.TeamCheck and LocalPlayer.Team and record.Target.Team == LocalPlayer.Team then
         self:_hide(record)
         return
+    end
+    if record.Kind == "Object" and record.Override.RemoveWhenInvisible then
+        if not record.VisualPart or objectVisualInvisible(record.VisualPart, record.Override.InvisibleThreshold) then
+            self:_hide(record)
+            return
+        end
     end
     local cframe, size, adornee = self:_geometry(record)
     if not cframe then
@@ -699,7 +810,10 @@ function NeonESP:AddObject(object, style)
     table.insert(record.Connections, object.Destroying:Connect(function()
         self:RemoveObject(object)
     end))
-    self:RefreshObject(object)
+    self:_monitorObjectLifecycle(record)
+    if self._objects[object] == record then
+        self:RefreshObject(object)
+    end
     return self
 end
 
@@ -708,6 +822,17 @@ function NeonESP:RemoveObject(object)
     if record then
         self._objects[object] = nil
         self:_destroyRecord(record)
+    end
+    return self
+end
+
+function NeonESP:RemoveByCoinID(coinID)
+    if coinID == nil then return self end
+    for object, record in pairs(self._objects) do
+        local visual = record.VisualPart
+        if record.Override.RemoveWhenCollected and visual and visual:GetAttribute("CoinID") == coinID then
+            self:RemoveObject(object)
+        end
     end
     return self
 end
@@ -797,8 +922,22 @@ function NeonESP:WatchFolder(folder, predicate, style, recursive)
         add(object)
     end
     if recursive then
-        table.insert(watcher.Connections, folder.DescendantAdded:Connect(add))
-        table.insert(watcher.Connections, folder.DescendantRemoving:Connect(remove))
+        table.insert(watcher.Connections, folder.DescendantAdded:Connect(function(child)
+            if child:IsA("TouchTransmitter") then
+                if child.Parent then add(child.Parent) end
+            elseif child.Name == "CoinVisual" and child:IsA("BasePart") then
+                if child.Parent then add(child.Parent) end
+            end
+            add(child)
+        end))
+        table.insert(watcher.Connections, folder.DescendantRemoving:Connect(function(child)
+            if child:IsA("TouchTransmitter") then
+                if child.Parent then remove(child.Parent) end
+            elseif child.Name == "CoinVisual" and child:IsA("BasePart") then
+                if child.Parent then remove(child.Parent) end
+            end
+            remove(child)
+        end))
     else
         table.insert(watcher.Connections, folder.ChildAdded:Connect(add))
         table.insert(watcher.Connections, folder.ChildRemoved:Connect(remove))
