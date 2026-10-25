@@ -8,6 +8,7 @@ assert(LocalPlayer, "NeonESP must run on the client")
 
 local NeonESP = {}
 NeonESP.__index = NeonESP
+NeonESP.Version = "2.1.0-ZeroPoint"
 
 local DEFAULTS = {
     Enabled = true,
@@ -24,6 +25,7 @@ local DEFAULTS = {
     HighlightColor = Color3.fromRGB(68, 255, 110),
     BoxTransparency = 0.08,
     BoxThickness = 1.4,
+    TextSize = 13,
     FillTransparency = 1,
     OutlineTransparency = 0,
     BoxSize = Vector3.new(4.1, 6, 3.2),
@@ -34,7 +36,8 @@ local DEFAULTS = {
 
 local EXTRA_TYPES = {
     NameColor = "Color3",
-    LabelText = "string"
+    LabelText = "string",
+    OutlineColor = "Color3"
 }
 
 local ROLE_COLORS = {
@@ -76,6 +79,8 @@ local function validateOption(name, value)
         assert(value >= 1 and value <= 240, "UpdateFPS must be between 1 and 240")
     elseif name == "MaxDistance" then
         assert(value >= 0, "MaxDistance must be nonnegative")
+    elseif name == "TextSize" then
+        assert(value >= 8 and value <= 40, "TextSize must be between 8 and 40")
     elseif name == "BoxThickness" then
         assert(value > 0, "BoxThickness must be positive")
     elseif name == "BoxTransparency" or name == "FillTransparency" or name == "OutlineTransparency" then
@@ -87,10 +92,15 @@ end
 
 local function mergeValidated(into, from)
     assert(type(from) == "table", "Expected a style table")
+    local changed = false
     for name, value in pairs(from) do
         validateOption(name, value)
-        into[name] = value
+        if into[name] ~= value then
+            into[name] = value
+            changed = true
+        end
     end
+    return changed
 end
 
 local function makeRecord(kind, target)
@@ -174,6 +184,9 @@ function NeonESP:_style(record)
     if style.NameColor == nil then
         style.NameColor = style.BoxColor
     end
+    if style.OutlineColor == nil then
+        style.OutlineColor = style.HighlightColor
+    end
     record.Style = style
     record.Dirty = false
     for _, line in ipairs(record.Lines) do
@@ -182,10 +195,11 @@ function NeonESP:_style(record)
     end
     if record.Label then
         record.Label.TextColor3 = style.NameColor
+        record.Label.TextSize = style.TextSize or 13
     end
     if record.Highlight then
         record.Highlight.FillColor = style.HighlightColor
-        record.Highlight.OutlineColor = style.HighlightColor
+        record.Highlight.OutlineColor = style.OutlineColor
         record.Highlight.FillTransparency = style.FillTransparency
         record.Highlight.OutlineTransparency = style.OutlineTransparency
         record.Highlight.DepthMode = style.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
@@ -257,7 +271,7 @@ function NeonESP:_ensureLabel(record, style)
     label.TextColor3 = style.NameColor
     label.TextStrokeColor3 = Color3.new(0, 0, 0)
     label.TextStrokeTransparency = 0.25
-    label.TextSize = 13
+    label.TextSize = style.TextSize or 13
     label.Font = Enum.Font.GothamBold
     label.ZIndex = 11
     label.Visible = false
@@ -278,7 +292,7 @@ function NeonESP:_ensureHighlight(record, adornee, style)
     highlight.Name = "NeonESPOutline"
     highlight.Adornee = adornee
     highlight.FillColor = style.HighlightColor
-    highlight.OutlineColor = style.HighlightColor
+    highlight.OutlineColor = style.OutlineColor
     highlight.FillTransparency = style.FillTransparency
     highlight.OutlineTransparency = style.OutlineTransparency
     highlight.DepthMode = style.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
@@ -467,8 +481,10 @@ end
 function NeonESP:SetOption(name, value)
     assert(not self._destroyed, "This NeonESP instance was destroyed")
     validateOption(name, value)
-    self.Options[name] = value
-    self:_markDirty()
+    if self.Options[name] ~= value then
+        self.Options[name] = value
+        self:_markDirty()
+    end
     if (name == "Enabled" or name == "PlayersEnabled" or name == "ObjectsEnabled") and not value then
         for _, record in pairs(self._players) do
             if name ~= "ObjectsEnabled" then
@@ -520,6 +536,33 @@ function NeonESP:SetPlayerRole(player, role)
     return self
 end
 
+function NeonESP:SyncPlayer(player, character)
+    local target = findPlayer(player)
+    if not target or target == LocalPlayer then return self end
+    if not self._players[target] then self:_trackPlayer(target) end
+    local record = self._players[target]
+    if record and record.Character ~= character then
+        self:_hide(record)
+        if record.Highlight then record.Highlight:Destroy() record.Highlight = nil end
+        record.Character = character
+        record.Root = character and character:FindFirstChild("HumanoidRootPart") or nil
+        record.Humanoid = character and character:FindFirstChildOfClass("Humanoid") or nil
+    end
+    return self
+end
+
+function NeonESP:SetPlayerStyle(player, boxColor, outlineColor, fillTransparency)
+    assert(typeof(boxColor) == "Color3", "Box color must be Color3")
+    local style = {
+        BoxColor = boxColor,
+        HighlightColor = boxColor,
+        OutlineColor = outlineColor or boxColor,
+        NameColor = boxColor
+    }
+    if fillTransparency ~= nil then style.FillTransparency = fillTransparency end
+    return self:SetPlayerOverride(player, style)
+end
+
 function NeonESP:GetPlayerRole(player)
     local target = findPlayer(player)
     local record = target and self._players[target]
@@ -565,12 +608,15 @@ function NeonESP:SetRoleColor(role, boxColor, highlightColor)
     if highlightColor ~= nil then
         assert(typeof(highlightColor) == "Color3", "Highlight color must be Color3")
     end
-    self.RoleColors[role] = {
-        BoxColor = boxColor,
-        HighlightColor = highlightColor or boxColor,
-        NameColor = boxColor
-    }
-    self:_markDirty()
+    local existing = self.RoleColors[role]
+    if not existing or existing.BoxColor ~= boxColor or existing.HighlightColor ~= (highlightColor or boxColor) then
+        self.RoleColors[role] = {
+            BoxColor = boxColor,
+            HighlightColor = highlightColor or boxColor,
+            NameColor = boxColor
+        }
+        self:_markDirty()
+    end
     return self
 end
 
@@ -578,8 +624,9 @@ function NeonESP:SetPlayerOverride(player, style)
     local target = findPlayer(player)
     local record = target and self._players[target]
     if record then
-        mergeValidated(record.Override, style)
-        record.Dirty = true
+        if mergeValidated(record.Override, style) then
+            record.Dirty = true
+        end
     end
     return self
 end
@@ -659,8 +706,9 @@ end
 function NeonESP:SetObjectOverride(object, style)
     local record = self._objects[object]
     if record then
-        mergeValidated(record.Override, style)
-        record.Dirty = true
+        if mergeValidated(record.Override, style) then
+            record.Dirty = true
+        end
     end
     return self
 end
