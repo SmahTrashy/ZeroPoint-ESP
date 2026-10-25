@@ -8,7 +8,7 @@ assert(LocalPlayer, "NeonESP must run on the client")
 
 local NeonESP = {}
 NeonESP.__index = NeonESP
-NeonESP.Version = "2.1.0-ZeroPoint"
+NeonESP.Version = "2.2.0-ZeroPoint"
 
 local DEFAULTS = {
     Enabled = true,
@@ -19,6 +19,7 @@ local DEFAULTS = {
     Names = false,
     Distances = false,
     ShowRole = false,
+    ShowHealth = false,
     TeamCheck = false,
     ThroughWalls = true,
     BoxColor = Color3.fromRGB(68, 255, 110),
@@ -410,7 +411,7 @@ function NeonESP:_renderRecord(record, camera, origin)
     elseif record.Highlight then
         record.Highlight.Enabled = false
     end
-    local wantsText = style.Names or style.Distances or (record.Kind == "Player" and style.ShowRole) or style.LabelText ~= nil
+    local wantsText = style.Names or style.Distances or (record.Kind == "Player" and (style.ShowRole or style.ShowHealth)) or style.LabelText ~= nil
     local points
     if style.Boxes or wantsText then
         points = self:_drawBox(record, camera, cframe, size, style, style.Boxes)
@@ -433,6 +434,14 @@ function NeonESP:_renderRecord(record, camera, origin)
     end
     if record.Kind == "Player" and style.ShowRole and record.Role then
         table.insert(textParts, "[" .. record.Role .. "]")
+    end
+    if record.Kind == "Player" and style.ShowHealth then
+        local humanoid = record.Humanoid
+        if humanoid and humanoid.Parent then
+            table.insert(textParts, string.format("[%d/%d HP]",
+                math.floor(math.max(humanoid.Health, 0) + 0.5),
+                math.floor(math.max(humanoid.MaxHealth, 0) + 0.5)))
+        end
     end
     if style.Distances then
         table.insert(textParts, "[" .. math.floor(distance + 0.5) .. " studs]")
